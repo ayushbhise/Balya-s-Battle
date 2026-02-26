@@ -1,3 +1,3 @@
 here is the url-
 
-https://balyas-battle--ayushbhise27.replit.app
+https://ayushbhise.github.io/Balya-s-Battle/
