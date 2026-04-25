@@ -1,0 +1,1596 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>BATTLE BALYA - Legend of the Cyan Blaster</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0a1a">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;font-family:monospace;}
+canvas{display:block;width:100vw;height:100vh;background:#000;}
+</style>
+</head>
+<body>
+<canvas id="gc"></canvas>
+<script>
+'use strict';
+const C=document.getElementById('gc');
+const ctx=C.getContext('2d');
+let W,H;
+let DPR=Math.min(window.devicePixelRatio||1,2);
+function resize(){
+  W=window.innerWidth;H=window.innerHeight;
+  C.width=W*DPR;C.height=H*DPR;
+  C.style.width=W+'px';C.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+resize();
+window.addEventListener('resize',resize);
+window.addEventListener('orientationchange',()=>setTimeout(resize,100));
+
+const STATE={MENU:0,PLAYING:1,LEVEL_INTRO:2,LEVEL_COMPLETE:3,GAME_OVER:4,
+  INFO:5,HOW_TO_PLAY:6,CREDITS:7,ENDING:8,TRAINING:10};
+let gameState=STATE.MENU;
+let currentLevel=0;
+let score=0;
+const menuItems=['PLAY','HOW TO PLAY','INFORMATION','CREATED BY'];
+let introTimer=0;
+let dialogueQueue=[];
+let currentDialogue=null;
+let dialogueCharIndex=0;
+let dialogueCharTimer=0;
+let dialogueMinTimer=0;
+let shakeTimer=0,shakeIntensity=0;
+let particles=[];
+let healthKits=[];
+let healthKitTimer=0;
+let enemyQueue=[];
+let currentEnemyIndex=0;
+let levelEnemiesDefeated=0;
+let globalTime=0;
+
+let trainingPhase=0;
+let trainingCharIndex=0;
+let trainingCharTimer=0;
+let trainingMinTimer=0;
+
+let endingPhase=0;
+let endingTimer=0;
+
+const keys={};
+window.addEventListener('keydown',e=>{keys[e.key]=true;if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key))e.preventDefault();});
+window.addEventListener('keyup',e=>{keys[e.key]=false;});
+
+let touches={left:false,right:false,jump:false,shoot:false};
+let touchAreas={};
+let activeTouches={};
+
+function setupTouchAreas(){
+  const isPortrait=H>W;
+  const bSize=isPortrait?Math.min(W*0.16,75):Math.min(H*0.14,65);
+  const padBottom=isPortrait?Math.max(H*0.04,20):15;
+  const sidePad=isPortrait?Math.max(W*0.04,12):20;
+  const by=H-bSize-padBottom;
+  touchAreas={
+    left:{x:sidePad,y:by,w:bSize,h:bSize,label:'<',color:'#ffffff'},
+    right:{x:sidePad+bSize+10,y:by,w:bSize,h:bSize,label:'>',color:'#ffffff'},
+    jump:{x:W-sidePad-bSize*2-10,y:by,w:bSize,h:bSize,label:'JUMP',color:'#44aaff'},
+    shoot:{x:W-sidePad-bSize,y:by,w:bSize,h:bSize,label:'FIRE',color:'#ff4444'}
+  };
+}
+
+const backBtn={};
+function updateBackBtn(){
+  backBtn.x=W/2-60;backBtn.y=H-60;backBtn.w=120;backBtn.h=42;
+}
+
+function isInRect(tx,ty,r){return tx>=r.x&&tx<=r.x+r.w&&ty>=r.y&&ty<=r.y+r.h;}
+
+function handleTouchStart(e){
+  e.preventDefault();
+  for(let t of e.changedTouches){
+    handlePress(t.clientX,t.clientY,t.identifier);
+  }
+}
+function handleTouchMove(e){e.preventDefault();}
+function handleTouchEnd(e){
+  e.preventDefault();
+  for(let t of e.changedTouches){
+    const id=t.identifier;
+    if(activeTouches[id]){
+      touches[activeTouches[id]]=false;
+      delete activeTouches[id];
+    }
+  }
+}
+
+function handlePress(tx,ty,id){
+  if(gameState===STATE.MENU){
+    const itemH=Math.min(H*0.08,52);const startY=H*0.45;
+    const itemW=Math.min(W*0.7,280);
+    for(let i=0;i<menuItems.length;i++){
+      const iy=startY+i*itemH;
+      if(ty>iy&&ty<iy+itemH-6&&tx>W/2-itemW/2&&tx<W/2+itemW/2){
+        handleMenuSelect(i);return;
+      }
+    }
+    return;
+  }
+  if(gameState===STATE.TRAINING){advanceTraining();return;}
+  if(gameState===STATE.LEVEL_INTRO||gameState===STATE.LEVEL_COMPLETE||gameState===STATE.GAME_OVER){handleAdvance();return;}
+  if(gameState===STATE.ENDING)return;
+  if(gameState===STATE.INFO||gameState===STATE.HOW_TO_PLAY||gameState===STATE.CREDITS){
+    updateBackBtn();
+    if(isInRect(tx,ty,backBtn))gameState=STATE.MENU;
+    return;
+  }
+  if(currentDialogue){
+    if(dialogueCharIndex<currentDialogue.text.length){
+      dialogueCharIndex=currentDialogue.text.length;
+      dialogueMinTimer=60;
+    }else if(dialogueMinTimer<=0){
+      dismissDialogue();
+    }
+    return;
+  }
+  setupTouchAreas();
+  const ta=touchAreas;
+  if(isInRect(tx,ty,ta.left)){touches.left=true;if(id!==undefined)activeTouches[id]='left';}
+  else if(isInRect(tx,ty,ta.right)){touches.right=true;if(id!==undefined)activeTouches[id]='right';}
+  else if(isInRect(tx,ty,ta.jump)){touches.jump=true;if(id!==undefined)activeTouches[id]='jump';}
+  else if(isInRect(tx,ty,ta.shoot)){touches.shoot=true;if(id!==undefined)activeTouches[id]='shoot';}
+}
+
+C.addEventListener('touchstart',handleTouchStart,{passive:false});
+C.addEventListener('touchmove',handleTouchMove,{passive:false});
+C.addEventListener('touchend',handleTouchEnd,{passive:false});
+C.addEventListener('touchcancel',handleTouchEnd,{passive:false});
+C.addEventListener('mousedown',e=>handlePress(e.clientX,e.clientY));
+C.addEventListener('mouseup',()=>{touches.left=false;touches.right=false;touches.jump=false;touches.shoot=false;});
+
+function handleMenuSelect(i){
+  if(i===0){startTraining();}
+  else if(i===1)gameState=STATE.HOW_TO_PLAY;
+  else if(i===2)gameState=STATE.INFO;
+  else if(i===3)gameState=STATE.CREDITS;
+}
+
+const trainingDialogues=[
+  {speaker:'OM SOLANKE',text:'Yo Balya! The shadows have returned. Our world stands on the brink of darkness once again...',color:'#00e5ff'},
+  {speaker:'OM SOLANKE',text:'For years I have studied the ancient codex, forging a weapon worthy of a true champion.',color:'#00e5ff'},
+  {speaker:'AYUSH BHISE',text:'And I have shaped this entire battlefield with my own hands. Every stone, every star.',color:'#ff7755'},
+  {speaker:'AYUSH BHISE',text:'Seventeen warriors stand between you and victory. Each one knows your name. Each one fears it.',color:'#ff7755'},
+  {speaker:'OM SOLANKE',text:'Take this... the LEGENDARY CYAN BLASTER. Forged in code, powered by destiny.',color:'#00e5ff'},
+  {speaker:'BALYA',text:'I feel the power coursing through me. The enemies will know what true might looks like!',color:'#44ff66'},
+  {speaker:'AYUSH BHISE',text:'Move. Jump. Fire. Survive. Show no mercy. The Cyan Blaster bows only to the worthy.',color:'#ff7755'},
+  {speaker:'OM SOLANKE',text:'The legend begins NOW. Rise, Battle Balya. Become the hero this world deserves!',color:'#00e5ff'}
+];
+
+function startTraining(){
+  gameState=STATE.TRAINING;
+  trainingPhase=0;
+  trainingCharIndex=0;
+  trainingCharTimer=0;
+  trainingMinTimer=90;
+}
+
+function advanceTraining(){
+  const td=trainingDialogues[trainingPhase];
+  if(trainingCharIndex<td.text.length){
+    trainingCharIndex=td.text.length;
+    trainingMinTimer=60;
+    return;
+  }
+  if(trainingMinTimer>0)return;
+  if(trainingPhase<trainingDialogues.length-1){
+    trainingPhase++;
+    trainingCharIndex=0;
+    trainingCharTimer=0;
+    trainingMinTimer=90;
+  }else{
+    currentLevel=1;startLevel();gameState=STATE.LEVEL_INTRO;introTimer=180;
+  }
+}
+
+function handleAdvance(){
+  if(gameState===STATE.LEVEL_INTRO){gameState=STATE.PLAYING;}
+  else if(gameState===STATE.LEVEL_COMPLETE){
+    currentLevel++;
+    if(currentLevel>14){startEnding();}
+    else{startLevel();gameState=STATE.LEVEL_INTRO;introTimer=180;}
+  }
+  else if(gameState===STATE.GAME_OVER){gameState=STATE.MENU;score=0;}
+}
+
+function startEnding(){gameState=STATE.ENDING;endingPhase=0;endingTimer=0;}
+
+const ENEMIES_DATA=[
+  {name:'Yash',color:'#1a1a2e',skinColor:'#3d2b1f',dialogue:"You can't defeat me, Balya!",speed:1.4,hp:90,dmg:6,bodyType:'muscular',hairColor:'#111',special:'melee'},
+  {name:'Soham',color:'#4a6fa5',skinColor:'#c8a882',dialogue:"Physics is unstoppable, Balya!",speed:0.9,hp:75,dmg:5,bodyType:'thin',hairColor:'#333',special:'projectile',hasGlasses:true},
+  {name:'Soman',color:'#cc3333',skinColor:'#b8804a',dialogue:"Catch my red fury!",speed:1.1,hp:90,dmg:7,bodyType:'stocky',hairColor:'#222',special:'projectile'},
+  {name:'Prasad',color:'#556b2f',skinColor:'#8d6e4c',dialogue:"Monkey force on you!",speed:1.7,hp:85,dmg:6,bodyType:'agile',hairColor:'#1a1a1a',special:'melee'},
+  {name:'Chincholkar',color:'#666',skinColor:'#d4a574',dialogue:"Jay Freefire!",speed:2.0,hp:75,dmg:5,bodyType:'tall_thin',hairColor:'#2a2a2a',special:'projectile'},
+  {name:'Parth',color:'#ff69b4',skinColor:'#deb887',dialogue:"Juice pila do mosambi ka!",speed:1.2,hp:80,dmg:5,bodyType:'slim',hairColor:'#4a3728',special:'projectile'},
+  {name:'Harshal',color:'#2f4f4f',skinColor:'#5c4033',dialogue:"Anime attack!",speed:1.5,hp:90,dmg:6,bodyType:'medium',hairColor:'#151515',special:'projectile'},
+  {name:'Jalamkar',color:'#ffd700',skinColor:'#c8a882',dialogue:"You can't outsmart me!",speed:1.3,hp:100,dmg:7,bodyType:'smart',hairColor:'#333',special:'projectile',hasGlasses:true},
+  {name:'Bhargav Bogambo',color:'#8b4513',skinColor:'#c8a882',dialogue:"Small but deadly!",speed:1.8,hp:90,dmg:6,bodyType:'short_strong',hairColor:'#2a2a2a',special:'melee'},
+  {name:'Shaurya',color:'#4682b4',skinColor:'#d4a574',dialogue:"Try to catch me!",speed:2.2,hp:85,dmg:6,bodyType:'short_agile',hairColor:'#222',special:'melee'},
+  {name:'Yogiraj',color:'#8b7355',skinColor:'#c8a882',dialogue:"You won't survive my weight!",speed:0.8,hp:140,dmg:9,bodyType:'fat',hairColor:'#1a1a1a',special:'melee'},
+  {name:'Shriprasad',color:'#9370db',skinColor:'#d4a574',dialogue:"I may be lazy, but I'll hit you!",speed:0.7,hp:80,dmg:5,bodyType:'lazy',hairColor:'#3a2a1a',special:'projectile',hasGlasses:true,curlyHair:true},
+  {name:'Abhinav',color:'#20b2aa',skinColor:'#f5deb3',dialogue:"Take this carefully!",speed:1.0,hp:100,dmg:6,bodyType:'chubby',hairColor:'#333',special:'projectile',hasGlasses:true},
+  {name:'Bhise',color:'#654321',skinColor:'#c8a882',dialogue:"Sheru Chhhuu!",speed:1.4,hp:110,dmg:7,bodyType:'medium',hairColor:'#222',special:'melee',hasDog:true},
+  {name:'Om P',color:'#ff6347',skinColor:'#d4a574',dialogue:"Yeah Buddy!",speed:1.2,hp:130,dmg:8,bodyType:'bodybuilder',hairColor:'#1a1a1a',special:'melee'},
+  {name:'Aaradhy',color:'#7b68ee',skinColor:'#d4a574',dialogue:"Ab tera kaam khatam",speed:1.5,hp:115,dmg:7,bodyType:'tall',hairColor:'#222',special:'projectile',hasGlasses:true},
+  {name:'Piyush',color:'#ff0000',skinColor:'#f5deb3',dialogue:"Pura gaav bulaunga marne ke liye!",speed:0.9,hp:350,dmg:11,bodyType:'boss',hairColor:'#333',special:'boss'}
+];
+
+const LEVEL_ENEMIES=[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9],[10],[11,12],[13,14,15],[16]];
+
+const player={x:100,y:0,w:40,h:58,vx:0,vy:0,hp:100,maxHp:100,facing:1,shootCooldown:0,
+  onGround:false,jumpPressed:false,invincible:0,animFrame:0,animTimer:0,auraPulse:0};
+let bullets=[];
+let enemies=[];
+let enemyBullets=[];
+let platforms=[];
+let groundY=0;
+let cameraX=0;
+let levelWidth=2000;
+let bgStars=[];
+
+function initStars(){bgStars=[];for(let i=0;i<120;i++)bgStars.push({x:Math.random()*3000,y:Math.random()*H*0.55,s:Math.random()*2+0.5,b:Math.random()});}
+initStars();
+window.addEventListener('resize',initStars);
+
+function getGroundY(){
+  const isPortrait=H>W;
+  const ctrlSpace=isPortrait?Math.min(W*0.16,75)+Math.max(H*0.04,20)+30:Math.min(H*0.14,65)+45;
+  const playArea=H-ctrlSpace-50;
+  return Math.min(H-ctrlSpace-30,50+playArea*0.85);
+}
+
+function startLevel(){
+  player.x=100;player.y=0;player.vx=0;player.vy=0;player.hp=player.maxHp;player.facing=1;player.invincible=0;
+  bullets=[];enemies=[];enemyBullets=[];particles=[];healthKits=[];healthKitTimer=0;
+  currentDialogue=null;dialogueQueue=[];dialogueCharIndex=0;dialogueMinTimer=0;
+  groundY=getGroundY();
+  cameraX=0;
+  setupTouchAreas();
+  levelWidth=1800+currentLevel*250;
+
+  platforms=[];
+  const numPlats=3+Math.floor(currentLevel*0.5);
+  const platSpace=groundY-100;
+  for(let i=0;i<numPlats;i++){
+    const py=Math.max(80,groundY-80-Math.random()*Math.min(120,platSpace*0.4));
+    platforms.push({x:300+i*(levelWidth/numPlats),y:py,w:110+Math.random()*70,h:14});
+  }
+
+  const lvlIdx=currentLevel-1;
+  enemyQueue=lvlIdx>=0&&lvlIdx<LEVEL_ENEMIES.length?LEVEL_ENEMIES[lvlIdx].filter(i=>i<ENEMIES_DATA.length):[];
+  currentEnemyIndex=0;
+  levelEnemiesDefeated=0;
+  spawnNextEnemy();
+
+  if(currentLevel===1){
+    queueDialogue('Om Solanke','Your true journey begins. Crush them, Balya!','left');
+  }else if(currentLevel===14){
+    queueDialogue('Ayush Bhise','The final boss awaits. Show him no mercy!','left');
+  }
+  introTimer=180;
+}
+
+function queueDialogue(speaker,text,side){
+  dialogueQueue.push({speaker,text,side});
+  showNextDialogue();
+}
+
+function spawnNextEnemy(){
+  if(currentEnemyIndex>=enemyQueue.length)return;
+  const ei=enemyQueue[currentEnemyIndex];
+  const ed=ENEMIES_DATA[ei];
+  const ex=Math.min(player.x+360+Math.random()*120,levelWidth-100);
+  const ey=groundY-58;
+  const enemy={
+    ...ed,idx:ei,x:ex,y:ey,
+    w:ed.bodyType==='fat'||ed.bodyType==='boss'?60:ed.bodyType==='tall'||ed.bodyType==='tall_thin'?34:42,
+    h:ed.bodyType==='tall'||ed.bodyType==='tall_thin'?70:ed.bodyType==='short_strong'||ed.bodyType==='short_agile'?48:ed.bodyType==='fat'?56:ed.bodyType==='boss'?74:58,
+    currentHp:ed.hp,vx:0,vy:0,facing:-1,onGround:false,
+    attackCooldown:0,attackTimer:30+Math.random()*40,
+    state:'idle',stateTimer:0,animFrame:0,animTimer:0,
+    dialogueShown:false,phase:1,minionTimer:0
+  };
+  enemies.push(enemy);
+  currentEnemyIndex++;
+  if(!enemy.dialogueShown){
+    queueDialogue(enemy.name,enemy.dialogue,'right');
+    enemy.dialogueShown=true;
+  }
+}
+
+function showNextDialogue(){
+  if(dialogueQueue.length>0&&!currentDialogue){
+    currentDialogue=dialogueQueue.shift();
+    dialogueCharIndex=0;
+    dialogueCharTimer=0;
+    dialogueMinTimer=90;
+  }
+}
+function dismissDialogue(){currentDialogue=null;dialogueMinTimer=0;showNextDialogue();}
+
+function spawnParticle(x,y,color,count){
+  for(let i=0;i<count;i++){
+    particles.push({x,y,vx:(Math.random()-0.5)*6,vy:-Math.random()*4-1,life:30+Math.random()*20,maxLife:50,color,size:2+Math.random()*3});
+  }
+}
+
+function spawnHealthKit(){
+  healthKits.push({x:player.x+250+Math.random()*350,y:groundY-22,w:22,h:22});
+}
+
+function updatePlayer(){
+  const spd=3.2;
+  const moveLeft=keys['ArrowLeft']||keys['a']||touches.left;
+  const moveRight=keys['ArrowRight']||keys['d']||touches.right;
+  const jump=keys['ArrowUp']||keys['w']||keys[' ']||touches.jump;
+  const shoot=keys['z']||keys['x']||keys['Enter']||touches.shoot;
+
+  if(moveLeft){player.vx=-spd;player.facing=-1;}
+  else if(moveRight){player.vx=spd;player.facing=1;}
+  else player.vx*=0.7;
+
+  if(jump&&player.onGround&&!player.jumpPressed){
+    player.vy=-10.5;player.onGround=false;player.jumpPressed=true;
+    spawnParticle(player.x+player.w/2,player.y+player.h,'#88ccff',5);
+  }
+  if(!jump)player.jumpPressed=false;
+
+  if(shoot&&player.shootCooldown<=0){
+    bullets.push({x:player.x+player.w/2+player.facing*22,y:player.y+player.h/2-2,vx:player.facing*9,vy:0,life:80,color:'#00ffff',size:6});
+    player.shootCooldown=14;
+    spawnParticle(player.x+player.w/2+player.facing*22,player.y+player.h/2,'#00ffff',4);
+  }
+  if(player.shootCooldown>0)player.shootCooldown--;
+
+  player.vy+=0.5;
+  player.x+=player.vx;
+  player.y+=player.vy;
+  player.auraPulse+=0.08;
+
+  if(player.x<0)player.x=0;
+  if(player.x>levelWidth-player.w)player.x=levelWidth-player.w;
+
+  player.onGround=false;
+  if(player.y+player.h>=groundY){player.y=groundY-player.h;player.vy=0;player.onGround=true;}
+
+  for(const p of platforms){
+    if(player.vy>=0&&player.x+player.w>p.x&&player.x<p.x+p.w&&
+       player.y+player.h>=p.y&&player.y+player.h<=p.y+p.h+10){
+      player.y=p.y-player.h;player.vy=0;player.onGround=true;
+    }
+  }
+
+  if(player.invincible>0)player.invincible--;
+  player.animTimer++;
+  if(player.animTimer>8){player.animTimer=0;player.animFrame=(player.animFrame+1)%4;}
+
+  cameraX=player.x-W/3;
+  if(cameraX<0)cameraX=0;
+  if(cameraX>levelWidth-W)cameraX=levelWidth-W;
+}
+
+function updateEnemies(){
+  for(let i=enemies.length-1;i>=0;i--){
+    const e=enemies[i];
+    const dx=player.x-e.x;
+    const dist=Math.abs(dx);
+
+    e.vy+=0.5;
+    e.facing=dx>0?1:-1;
+
+    if(e.special==='boss'){
+      e.stateTimer--;
+      if(e.stateTimer<=0){
+        const states=['chase','shoot','roll','shoot'];
+        if(e.currentHp<e.hp*0.5)states.push('summon');
+        e.state=states[Math.floor(Math.random()*states.length)];
+        e.stateTimer=70+Math.random()*50;
+      }
+      if(e.state==='chase'){
+        e.vx=e.facing*e.speed*1.6;
+        if(dist<70&&e.attackCooldown<=0){
+          hitPlayer(e.dmg);e.attackCooldown=25;shakeTimer=10;shakeIntensity=4;
+        }
+      }else if(e.state==='shoot'){
+        e.vx*=0.5;
+        if(e.attackTimer<=0){
+          for(let a=-1;a<=1;a++){
+            enemyBullets.push({x:e.x+e.w/2,y:e.y+e.h/3,vx:e.facing*5.5,vy:a*2.5,life:90,color:'#ff3333',size:7});
+          }
+          e.attackTimer=22;
+        }
+      }else if(e.state==='roll'){
+        e.vx=e.facing*e.speed*3.2;
+        if(dist<60){hitPlayer(e.dmg*1.4);shakeTimer=15;shakeIntensity=6;}
+      }else if(e.state==='summon'){
+        if(e.minionTimer<=0&&enemies.length<5){
+          const mi=Math.floor(Math.random()*4);
+          const med=ENEMIES_DATA[mi];
+          enemies.push({...med,idx:mi,x:e.x+e.facing*80,y:groundY-58,w:36,h:54,currentHp:med.hp*0.5,
+            vx:0,vy:0,facing:e.facing,onGround:false,attackCooldown:0,attackTimer:30,
+            state:'chase',stateTimer:120,animFrame:0,animTimer:0,dialogueShown:true,phase:1,minionTimer:0});
+          e.minionTimer=120;
+        }
+        e.vx*=0.3;
+      }
+    }else{
+      if(dist>320){e.vx=e.facing*e.speed*0.6;}
+      else if(dist>70){e.vx=e.facing*e.speed*1.1;}
+      else{
+        e.vx*=0.5;
+        if(e.special==='melee'&&e.attackCooldown<=0){
+          hitPlayer(e.dmg);e.attackCooldown=35;shakeTimer=5;shakeIntensity=3;
+        }
+      }
+      if(e.special==='projectile'&&e.attackTimer<=0&&dist<560){
+        enemyBullets.push({x:e.x+e.w/2,y:e.y+e.h/3,vx:e.facing*4.5,vy:0,life:80,color:e.color,size:5});
+        e.attackTimer=35+Math.random()*25;
+      }
+      if(Math.random()<0.012&&e.onGround&&dist<400)e.vy=-8.5;
+    }
+
+    if(e.attackCooldown>0)e.attackCooldown--;
+    if(e.attackTimer>0)e.attackTimer--;
+    if(e.minionTimer>0)e.minionTimer--;
+
+    e.x+=e.vx;e.y+=e.vy;
+    e.onGround=false;
+    if(e.y+e.h>=groundY){e.y=groundY-e.h;e.vy=0;e.onGround=true;}
+    if(e.x<0)e.x=0;
+    if(e.x>levelWidth-e.w)e.x=levelWidth-e.w;
+
+    for(const p of platforms){
+      if(e.vy>=0&&e.x+e.w>p.x&&e.x<p.x+p.w&&e.y+e.h>=p.y&&e.y+e.h<=p.y+p.h+10){
+        e.y=p.y-e.h;e.vy=0;e.onGround=true;
+      }
+    }
+
+    e.animTimer++;if(e.animTimer>10){e.animTimer=0;e.animFrame=(e.animFrame+1)%4;}
+  }
+}
+
+function hitPlayer(dmg){
+  if(player.invincible>0)return;
+  player.hp-=dmg;
+  player.invincible=35;
+  spawnParticle(player.x+player.w/2,player.y+player.h/2,'#ff4444',10);
+  shakeTimer=8;shakeIntensity=4;
+  if(player.hp<=0){player.hp=0;gameState=STATE.GAME_OVER;}
+}
+
+function updateBullets(){
+  for(let i=bullets.length-1;i>=0;i--){
+    const b=bullets[i];
+    b.x+=b.vx;b.y+=b.vy;b.life--;
+    if(b.life<=0||b.x<cameraX-50||b.x>cameraX+W+50){bullets.splice(i,1);continue;}
+    let hit=false;
+    for(let j=enemies.length-1;j>=0;j--){
+      const e=enemies[j];
+      if(b.x>e.x&&b.x<e.x+e.w&&b.y>e.y&&b.y<e.y+e.h){
+        e.currentHp-=15;
+        spawnParticle(b.x,b.y,e.color,6);
+        bullets.splice(i,1);hit=true;
+        shakeTimer=3;shakeIntensity=2;
+        if(e.currentHp<=0){
+          spawnParticle(e.x+e.w/2,e.y+e.h/2,'#ffaa00',20);
+          score+=100*currentLevel;
+          enemies.splice(j,1);
+          levelEnemiesDefeated++;
+          if(currentEnemyIndex<enemyQueue.length){
+            setTimeout(()=>spawnNextEnemy(),1200);
+          }else if(enemies.length===0){
+            gameState=STATE.LEVEL_COMPLETE;
+            if(currentLevel===1){
+              queueDialogue('Om Solanke','MAGNIFICENT! You wield the Cyan Blaster like a true champion!','left');
+            }
+          }
+        }
+        break;
+      }
+    }
+    if(hit)continue;
+  }
+  for(let i=enemyBullets.length-1;i>=0;i--){
+    const b=enemyBullets[i];
+    b.x+=b.vx;b.y+=b.vy;b.life--;
+    if(b.life<=0||b.x<cameraX-50||b.x>cameraX+W+50){enemyBullets.splice(i,1);continue;}
+    if(b.x>player.x&&b.x<player.x+player.w&&b.y>player.y&&b.y<player.y+player.h){
+      hitPlayer(5);enemyBullets.splice(i,1);
+    }
+  }
+}
+
+function updateParticles(){
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;p.life--;
+    if(p.life<=0)particles.splice(i,1);
+  }
+}
+
+function updateHealthKits(){
+  healthKitTimer++;
+  if(healthKitTimer>320&&healthKits.length<2&&player.hp<player.maxHp*0.7){
+    spawnHealthKit();healthKitTimer=0;
+  }
+  for(let i=healthKits.length-1;i>=0;i--){
+    const hk=healthKits[i];
+    if(player.x+player.w>hk.x&&player.x<hk.x+hk.w&&player.y+player.h>hk.y&&player.y<hk.y+hk.h){
+      player.hp=Math.min(player.maxHp,player.hp+30);
+      spawnParticle(hk.x+11,hk.y+11,'#00ff00',12);
+      healthKits.splice(i,1);
+    }
+  }
+}
+
+function updateDialogue(){
+  if(!currentDialogue)return;
+  if(dialogueCharIndex<currentDialogue.text.length){
+    dialogueCharTimer++;
+    if(dialogueCharTimer>=2){dialogueCharTimer=0;dialogueCharIndex++;}
+  }
+  if(dialogueMinTimer>0)dialogueMinTimer--;
+}
+
+function drawBackground(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#06061a');
+  grd.addColorStop(0.4,'#1a0a35');
+  grd.addColorStop(0.7,'#2a0a25');
+  grd.addColorStop(1,'#0a1a0a');
+  ctx.fillStyle=grd;
+  ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle='#fff';
+  for(const s of bgStars){
+    const sx=((s.x-cameraX*0.2)%W+W)%W;
+    const alpha=0.3+0.7*Math.abs(Math.sin(globalTime*0.002+s.b*10));
+    ctx.globalAlpha=alpha;
+    ctx.beginPath();ctx.arc(sx,s.y,s.s,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  const moonX=W*0.82;const moonY=H*0.1;
+  const mgrd=ctx.createRadialGradient(moonX,moonY,10,moonX,moonY,50);
+  mgrd.addColorStop(0,'rgba(255,240,200,0.9)');
+  mgrd.addColorStop(0.5,'rgba(255,200,150,0.25)');
+  mgrd.addColorStop(1,'transparent');
+  ctx.fillStyle=mgrd;
+  ctx.beginPath();ctx.arc(moonX,moonY,50,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fff8dc';
+  ctx.beginPath();ctx.arc(moonX,moonY,14,0,Math.PI*2);ctx.fill();
+
+  for(let i=0;i<6;i++){
+    const mx=((i*350-cameraX*0.3)%(W+200)+W+200)%(W+200)-100;
+    ctx.fillStyle='rgba(15,8,30,0.75)';
+    ctx.beginPath();
+    ctx.moveTo(mx,groundY);
+    ctx.lineTo(mx+40,groundY-70-i*12);
+    ctx.lineTo(mx+80,groundY);
+    ctx.fill();
+  }
+}
+
+function drawGround(){
+  ctx.fillStyle='#0f1f0a';
+  ctx.fillRect(0,groundY,W,H-groundY);
+  const grd=ctx.createLinearGradient(0,groundY,0,groundY+30);
+  grd.addColorStop(0,'#3a5a2a');grd.addColorStop(1,'#1a2a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,groundY,W,5);
+  ctx.fillStyle='#5a7a3a';ctx.fillRect(0,groundY,W,2);
+  for(let i=-cameraX%30;i<W;i+=30){
+    ctx.fillStyle='#1e3a1e';
+    ctx.fillRect(i,groundY+5,15,2);
+  }
+}
+
+function drawPlatforms(){
+  for(const p of platforms){
+    const px=p.x-cameraX;
+    if(px>W+100||px+p.w<-100)continue;
+    ctx.fillStyle='#3a2a4a';
+    ctx.fillRect(px,p.y,p.w,p.h);
+    ctx.fillStyle='#6a4a8a';
+    ctx.fillRect(px,p.y,p.w,3);
+    ctx.fillStyle='#1a0a2a';
+    ctx.fillRect(px+2,p.y+p.h-2,p.w-4,2);
+  }
+}
+
+function drawCharBody(x,y,w,h,skinColor,clothColor,hairColor,facing,animFrame,bodyType,extras){
+  const cx=x-cameraX;
+  if(cx>W+60||cx+w<-60)return;
+  const legOffset=Math.sin(animFrame*Math.PI/2)*4;
+
+  if(bodyType==='fat'||bodyType==='boss'){
+    ctx.fillStyle=clothColor;
+    ctx.beginPath();
+    ctx.ellipse(cx+w/2,y+h*0.55,w/2+4,h*0.35,0,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle=skinColor;
+    ctx.beginPath();ctx.arc(cx+w/2,y+h*0.2,w*0.35,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.15,y+h*0.7,w*0.25,h*0.3+legOffset);
+    ctx.fillRect(cx+w*0.6,y+h*0.7,w*0.25,h*0.3-legOffset);
+  }else if(bodyType==='tall'||bodyType==='tall_thin'){
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.2,y+h*0.25,w*0.6,h*0.45);
+    ctx.fillStyle=skinColor;
+    ctx.beginPath();ctx.arc(cx+w/2,y+h*0.15,w*0.32,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.25,y+h*0.65,w*0.2,h*0.35+legOffset);
+    ctx.fillRect(cx+w*0.55,y+h*0.65,w*0.2,h*0.35-legOffset);
+  }else if(bodyType==='bodybuilder'){
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.1,y+h*0.25,w*0.8,h*0.4);
+    ctx.fillStyle=skinColor;
+    ctx.beginPath();ctx.arc(cx+w/2,y+h*0.15,w*0.35,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=skinColor;
+    ctx.fillRect(cx-4,y+h*0.28,w*0.2,h*0.25);
+    ctx.fillRect(cx+w-w*0.2+4,y+h*0.28,w*0.2,h*0.25);
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.2,y+h*0.6,w*0.25,h*0.4+legOffset);
+    ctx.fillRect(cx+w*0.55,y+h*0.6,w*0.25,h*0.4-legOffset);
+  }else if(bodyType==='agile'||bodyType==='short_agile'){
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.2,y+h*0.3,w*0.6,h*0.35);
+    ctx.fillStyle=skinColor;
+    ctx.beginPath();ctx.arc(cx+w/2,y+h*0.2,w*0.3,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.2,y+h*0.6,w*0.22,h*0.4+legOffset*1.5);
+    ctx.fillRect(cx+w*0.58,y+h*0.6,w*0.22,h*0.4-legOffset*1.5);
+  }else if(bodyType==='stocky'){
+    ctx.fillStyle=clothColor;
+    ctx.beginPath();
+    ctx.ellipse(cx+w/2,y+h*0.5,w/2,h*0.28,0,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle=skinColor;
+    ctx.beginPath();ctx.arc(cx+w/2,y+h*0.2,w*0.33,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.2,y+h*0.65,w*0.25,h*0.35+legOffset);
+    ctx.fillRect(cx+w*0.55,y+h*0.65,w*0.25,h*0.35-legOffset);
+  }else{
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.2,y+h*0.28,w*0.6,h*0.38);
+    ctx.fillStyle=skinColor;
+    ctx.beginPath();ctx.arc(cx+w/2,y+h*0.18,w*0.3,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=clothColor;
+    ctx.fillRect(cx+w*0.22,y+h*0.62,w*0.22,h*0.38+legOffset);
+    ctx.fillRect(cx+w*0.56,y+h*0.62,w*0.22,h*0.38-legOffset);
+  }
+
+  ctx.fillStyle=hairColor;
+  const headY=y+h*0.08;
+  const headR=w*0.3;
+  if(extras&&extras.curlyHair){
+    for(let a=0;a<6;a++){
+      const ax=cx+w/2+Math.cos(a)*headR*0.9;
+      const ay=headY+h*0.05+Math.sin(a)*headR*0.6-headR*0.5;
+      ctx.beginPath();ctx.arc(ax,ay,5,0,Math.PI*2);ctx.fill();
+    }
+  }else{
+    ctx.fillRect(cx+w/2-headR,headY,headR*2,headR*0.7);
+    if(bodyType==='boss'){
+      ctx.fillRect(cx+w/2-headR-3,headY-2,headR*2+6,headR*0.4);
+    }
+  }
+
+  ctx.fillStyle='#fff';
+  const eyeX=cx+w/2+facing*4;
+  const eyeY=y+h*0.17;
+  ctx.beginPath();ctx.arc(eyeX-3,eyeY,2.5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(eyeX+5,eyeY,2.5,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#111';
+  ctx.beginPath();ctx.arc(eyeX-3+facing,eyeY,1.2,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(eyeX+5+facing,eyeY,1.2,0,Math.PI*2);ctx.fill();
+
+  if(extras&&extras.hasGlasses){
+    ctx.strokeStyle='#aaa';ctx.lineWidth=1;
+    ctx.strokeRect(eyeX-7,eyeY-4,8,7);
+    ctx.strokeRect(eyeX+1,eyeY-4,8,7);
+    ctx.beginPath();ctx.moveTo(eyeX+1,eyeY-1);ctx.lineTo(eyeX-1,eyeY-1);ctx.stroke();
+  }
+
+  if(extras&&extras.hasDog){
+    const dogX=cx+w/2-facing*30;
+    const dogY=y+h-16;
+    ctx.fillStyle='#1a1a1a';
+    ctx.fillRect(dogX,dogY,18,10);
+    ctx.beginPath();ctx.arc(dogX+(facing>0?18:0),dogY+3,5,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#333';
+    ctx.fillRect(dogX+2,dogY+10,4,6+legOffset);
+    ctx.fillRect(dogX+12,dogY+10,4,6-legOffset);
+  }
+}
+
+function drawPlayer(){
+  if(player.invincible>0&&Math.floor(player.invincible/3)%2===0)return;
+  const px=player.x-cameraX;
+  const py=player.y;
+  const cx=px+player.w/2;
+  const cy=py+player.h/2;
+
+  const auraR=42+Math.sin(player.auraPulse)*4;
+  const aura=ctx.createRadialGradient(cx,cy,0,cx,cy,auraR);
+  aura.addColorStop(0,'rgba(0,255,255,0.18)');
+  aura.addColorStop(0.5,'rgba(0,200,255,0.08)');
+  aura.addColorStop(1,'transparent');
+  ctx.fillStyle=aura;
+  ctx.beginPath();ctx.arc(cx,cy,auraR,0,Math.PI*2);ctx.fill();
+
+  const capeColor='#aa1a1a';
+  const capeBack=Math.sin(player.auraPulse*0.5)*3;
+  ctx.fillStyle=capeColor;
+  ctx.beginPath();
+  ctx.moveTo(px+player.w*0.3,py+player.h*0.25);
+  ctx.lineTo(px-6-player.facing*capeBack,py+player.h*0.7);
+  ctx.lineTo(px+player.w*0.5,py+player.h*0.85);
+  ctx.lineTo(px+player.w+6+player.facing*capeBack,py+player.h*0.7);
+  ctx.lineTo(px+player.w*0.7,py+player.h*0.25);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle='#660000';
+  ctx.fillRect(px+player.w*0.3,py+player.h*0.22,player.w*0.4,3);
+
+  const torsoGrd=ctx.createLinearGradient(px,py+player.h*0.3,px+player.w,py+player.h*0.65);
+  torsoGrd.addColorStop(0,'#1a4a99');
+  torsoGrd.addColorStop(0.5,'#3366cc');
+  torsoGrd.addColorStop(1,'#1a4a99');
+  ctx.fillStyle=torsoGrd;
+  ctx.fillRect(px+player.w*0.18,py+player.h*0.3,player.w*0.64,player.h*0.36);
+
+  ctx.fillStyle='#ffd700';
+  ctx.beginPath();
+  ctx.moveTo(px+player.w/2,py+player.h*0.36);
+  ctx.lineTo(px+player.w/2-6,py+player.h*0.45);
+  ctx.lineTo(px+player.w/2,py+player.h*0.5);
+  ctx.lineTo(px+player.w/2+6,py+player.h*0.45);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle='#f0d0a0';
+  ctx.beginPath();ctx.arc(cx,py+player.h*0.18,player.w*0.32,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='rgba(255,200,150,0.4)';
+  ctx.beginPath();ctx.arc(cx-player.facing*6,py+player.h*0.2,4,0,Math.PI*2);ctx.fill();
+
+  ctx.fillStyle='#2a1a0a';
+  for(let i=-4;i<=4;i++){
+    const hx=cx+i*3-1.5;
+    const hy=py+player.h*0.05+Math.abs(i)*1.5;
+    ctx.fillRect(hx,hy,4,11-Math.abs(i));
+  }
+  ctx.fillStyle='#ffd700';
+  ctx.beginPath();
+  ctx.moveTo(cx-10,py+player.h*0.07);
+  ctx.lineTo(cx,py-2);
+  ctx.lineTo(cx+10,py+player.h*0.07);
+  ctx.lineTo(cx+8,py+player.h*0.1);
+  ctx.lineTo(cx,py+player.h*0.04);
+  ctx.lineTo(cx-8,py+player.h*0.1);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle='#ff4444';
+  ctx.beginPath();ctx.arc(cx,py+player.h*0.06,2,0,Math.PI*2);ctx.fill();
+
+  ctx.fillStyle='#fff';
+  const peyeX=cx+player.facing*3;
+  const peyeY=py+player.h*0.18;
+  ctx.beginPath();ctx.arc(peyeX-3,peyeY,2.8,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(peyeX+5,peyeY,2.8,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#0066ff';
+  ctx.beginPath();ctx.arc(peyeX-3+player.facing,peyeY,1.6,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(peyeX+5+player.facing,peyeY,1.6,0,Math.PI*2);ctx.fill();
+
+  ctx.fillStyle='#1a3366';
+  const lo=Math.sin(player.animFrame*Math.PI/2)*4;
+  ctx.fillRect(px+player.w*0.22,py+player.h*0.62,player.w*0.22,player.h*0.38+lo);
+  ctx.fillRect(px+player.w*0.56,py+player.h*0.62,player.w*0.22,player.h*0.38-lo);
+
+  ctx.fillStyle='#8b4513';
+  ctx.fillRect(px+player.w*0.2,py+player.h*0.96,player.w*0.26,4);
+  ctx.fillRect(px+player.w*0.54,py+player.h*0.96,player.w*0.26,4);
+
+  const gx=cx+player.facing*18;
+  const gy=py+player.h*0.42;
+  ctx.fillStyle='#444';
+  ctx.fillRect(gx,gy,player.facing*16,5);
+  ctx.fillStyle='#888';
+  ctx.fillRect(gx,gy+1,player.facing*16,2);
+  ctx.fillStyle='#222';
+  ctx.fillRect(gx+player.facing*12,gy-4,player.facing*7,12);
+  ctx.fillStyle='#00ffff';
+  ctx.fillRect(gx+player.facing*15,gy-1,player.facing*4,3);
+
+  const muzzleX=gx+player.facing*18;
+  const muzzleY=gy+2;
+  const muzzleGlow=ctx.createRadialGradient(muzzleX,muzzleY,0,muzzleX,muzzleY,12);
+  muzzleGlow.addColorStop(0,'rgba(0,255,255,0.9)');
+  muzzleGlow.addColorStop(0.5,'rgba(0,200,255,0.4)');
+  muzzleGlow.addColorStop(1,'transparent');
+  ctx.fillStyle=muzzleGlow;
+  ctx.beginPath();ctx.arc(muzzleX,muzzleY,12,0,Math.PI*2);ctx.fill();
+
+  if(player.shootCooldown>8){
+    ctx.fillStyle='rgba(255,255,255,0.9)';
+    ctx.beginPath();ctx.arc(muzzleX,muzzleY,5,0,Math.PI*2);ctx.fill();
+  }
+}
+
+function drawEnemies(){
+  for(const e of enemies){
+    drawCharBody(e.x,e.y,e.w,e.h,e.skinColor,e.color,e.hairColor,e.facing,e.animFrame,e.bodyType,
+      {hasGlasses:e.hasGlasses,curlyHair:e.curlyHair,hasDog:e.hasDog});
+
+    const ex=e.x-cameraX;
+    const barW=e.w+10;
+    const barH=5;
+    const barX=ex-5;
+    const barY=e.y-14;
+    ctx.fillStyle='rgba(0,0,0,0.7)';
+    ctx.fillRect(barX-1,barY-1,barW+2,barH+2);
+    ctx.fillStyle='#440000';
+    ctx.fillRect(barX,barY,barW,barH);
+    const hpRatio=e.currentHp/e.hp;
+    ctx.fillStyle=hpRatio>0.5?'#44dd44':hpRatio>0.25?'#dddd44':'#dd4444';
+    ctx.fillRect(barX,barY,barW*hpRatio,barH);
+
+    ctx.fillStyle='#fff';
+    ctx.font='bold 10px monospace';
+    ctx.textAlign='center';
+    ctx.fillText(e.name,ex+e.w/2,barY-4);
+  }
+}
+
+function drawBullets(){
+  for(const b of bullets){
+    const bx=b.x-cameraX;
+    const grd=ctx.createRadialGradient(bx,b.y,0,bx,b.y,b.size*2.5);
+    grd.addColorStop(0,'#ffffff');
+    grd.addColorStop(0.3,b.color);
+    grd.addColorStop(1,'transparent');
+    ctx.fillStyle=grd;
+    ctx.beginPath();ctx.arc(bx,b.y,b.size*2.5,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=b.color;
+    ctx.shadowColor=b.color;ctx.shadowBlur=10;
+    ctx.beginPath();ctx.arc(bx,b.y,b.size,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0;
+  }
+  for(const b of enemyBullets){
+    const bx=b.x-cameraX;
+    ctx.fillStyle=b.color;
+    ctx.shadowColor=b.color;ctx.shadowBlur=8;
+    ctx.beginPath();ctx.arc(bx,b.y,b.size,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0;
+  }
+}
+
+function drawParticles(){
+  for(const p of particles){
+    const px=p.x-cameraX;
+    ctx.globalAlpha=p.life/p.maxLife;
+    ctx.fillStyle=p.color;
+    ctx.fillRect(px-p.size/2,p.y-p.size/2,p.size,p.size);
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawHealthKits(){
+  for(const hk of healthKits){
+    const hx=hk.x-cameraX;
+    const pulse=1+Math.sin(globalTime*0.01)*0.1;
+    ctx.fillStyle='#00cc00';
+    ctx.fillRect(hx,hk.y,hk.w,hk.h);
+    ctx.fillStyle='#fff';
+    ctx.fillRect(hx+hk.w/2-2,hk.y+3,4,hk.h-6);
+    ctx.fillRect(hx+3,hk.y+hk.h/2-2,hk.w-6,4);
+    const glow=ctx.createRadialGradient(hx+11,hk.y+11,0,hx+11,hk.y+11,22*pulse);
+    glow.addColorStop(0,'rgba(0,255,0,0.3)');
+    glow.addColorStop(1,'transparent');
+    ctx.fillStyle=glow;
+    ctx.beginPath();ctx.arc(hx+11,hk.y+11,22*pulse,0,Math.PI*2);ctx.fill();
+  }
+}
+
+function drawHUD(){
+  const isPortrait=H>W;
+  const barW=isPortrait?Math.min(W*0.45,180):180;
+  const barH=16;const barX=15;const barY=15;
+  ctx.fillStyle='rgba(0,0,0,0.7)';
+  ctx.fillRect(barX-3,barY-3,barW+6,barH+6);
+  ctx.fillStyle='#440000';
+  ctx.fillRect(barX,barY,barW,barH);
+  const hpRatio=player.hp/player.maxHp;
+  const hpGrd=ctx.createLinearGradient(barX,barY,barX+barW*hpRatio,barY);
+  hpGrd.addColorStop(0,'#ff2222');hpGrd.addColorStop(1,'#ff8866');
+  ctx.fillStyle=hpGrd;
+  ctx.fillRect(barX,barY,barW*hpRatio,barH);
+  ctx.fillStyle='#fff';ctx.font='bold 11px monospace';ctx.textAlign='left';
+  ctx.fillText('HP '+Math.ceil(player.hp)+'/'+player.maxHp,barX+5,barY+12);
+
+  ctx.fillStyle='rgba(0,0,0,0.6)';
+  ctx.fillRect(barX-3,barY+barH+5,barW+6,38);
+  ctx.fillStyle='#ffd700';ctx.font='bold 13px monospace';
+  ctx.fillText('SCORE '+score,barX,barY+barH+18);
+  ctx.fillStyle='#ff8866';ctx.font='bold 11px monospace';
+  ctx.fillText('LVL '+currentLevel+'  ENEMIES '+levelEnemiesDefeated+'/'+enemyQueue.length,barX,barY+barH+34);
+}
+
+function drawTouchControls(){
+  setupTouchAreas();
+  const ta=touchAreas;
+  ctx.globalAlpha=0.45;
+  for(const k of ['left','right','jump','shoot']){
+    const b=ta[k];
+    const cx=b.x+b.w/2,cy=b.y+b.h/2;
+    const r=b.w/2-3;
+    const isPressed=touches[k];
+    ctx.fillStyle=isPressed?b.color:'rgba(255,255,255,0.05)';
+    if(isPressed){ctx.globalAlpha=0.7;}
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=0.55;
+    ctx.strokeStyle=b.color;ctx.lineWidth=2.5;
+    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+    ctx.fillStyle=isPressed?'#fff':b.color;
+    ctx.font='bold '+(b.label.length>1?13:22)+'px monospace';
+    ctx.textAlign='center';
+    ctx.fillText(b.label,cx,cy+(b.label.length>1?5:8));
+    ctx.globalAlpha=0.45;
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawDialogue(){
+  if(!currentDialogue)return;
+  const isPortrait=H>W;
+  const dw=Math.min(W*0.92,520);
+  const padX=18,padY=14;
+  ctx.font='bold 14px monospace';
+  const lines=wrapTextLines(currentDialogue.text.substring(0,dialogueCharIndex),dw-padX*2);
+  const dh=padY*2+24+lines.length*18+18;
+  const dx=(W-dw)/2;
+  const dy=isPortrait?H*0.22:H*0.1;
+
+  ctx.shadowColor='rgba(0,0,0,0.8)';ctx.shadowBlur=15;
+  ctx.fillStyle='rgba(8,8,20,0.96)';
+  ctx.strokeStyle=currentDialogue.side==='left'?'#00e5ff':'#ff5555';
+  ctx.lineWidth=3;
+  roundRect(ctx,dx,dy,dw,dh,12,true,true);
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle=currentDialogue.side==='left'?'rgba(0,229,255,0.15)':'rgba(255,85,85,0.15)';
+  ctx.fillRect(dx+1,dy+1,dw-2,28);
+
+  ctx.fillStyle=currentDialogue.side==='left'?'#00e5ff':'#ff7777';
+  ctx.font='bold 13px monospace';
+  ctx.textAlign='left';
+  ctx.fillText(currentDialogue.speaker.toUpperCase(),dx+padX,dy+20);
+
+  ctx.fillStyle='#fff';
+  ctx.font='14px monospace';
+  let ly=dy+padY+30;
+  for(const line of lines){
+    ctx.fillText(line,dx+padX,ly);
+    ly+=18;
+  }
+
+  if(dialogueCharIndex<currentDialogue.text.length){
+    if(Math.floor(globalTime/15)%2===0){
+      ctx.fillStyle='#fff';
+      const lastLine=lines[lines.length-1]||'';
+      const cursorX=dx+padX+ctx.measureText(lastLine).width+2;
+      ctx.fillRect(cursorX,ly-14,7,2);
+    }
+  }else{
+    const ready=dialogueMinTimer<=0;
+    ctx.fillStyle=ready?'#aaa':'#555';
+    ctx.font='9px monospace';
+    ctx.textAlign='right';
+    ctx.fillText(ready?'[TAP to continue]':'[wait...]',dx+dw-padX,dy+dh-8);
+  }
+}
+
+function roundRect(ctx,x,y,w,h,r,fill,stroke){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath();
+  if(fill)ctx.fill();if(stroke)ctx.stroke();
+}
+
+function wrapTextLines(text,maxW){
+  const words=text.split(' ');
+  const lines=[];let line='';
+  for(const w of words){
+    const test=line?line+' '+w:w;
+    if(ctx.measureText(test).width>maxW&&line){
+      lines.push(line);line=w;
+    }else line=test;
+  }
+  if(line)lines.push(line);
+  return lines;
+}
+
+function drawMenu(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a0a3a');grd.addColorStop(0.5,'#3a0a4e');grd.addColorStop(1,'#0a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  for(const s of bgStars){
+    const alpha=0.3+0.7*Math.abs(Math.sin(globalTime*0.001+s.b*10));
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle='#fff';
+    ctx.beginPath();ctx.arc(s.x%W,s.y,s.s,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  const titleY=H*0.18;
+  const titleSize=Math.min(W*0.13,72);
+
+  ctx.shadowColor='#ff0044';ctx.shadowBlur=30;
+  ctx.fillStyle='#ff0044';
+  ctx.font='900 '+titleSize+'px monospace';
+  ctx.textAlign='center';
+  ctx.fillText('BATTLE',W/2,titleY);
+  ctx.shadowBlur=20;
+  ctx.fillStyle='#ffaa00';
+  ctx.fillText('BALYA',W/2,titleY+titleSize*0.95);
+  ctx.shadowBlur=0;
+
+  const grad=ctx.createLinearGradient(0,titleY-titleSize*0.5,0,titleY+titleSize*0.6);
+  grad.addColorStop(0,'#ffeb3b');grad.addColorStop(0.5,'#ff5722');grad.addColorStop(1,'#b71c1c');
+  ctx.fillStyle=grad;
+  ctx.font='900 '+titleSize+'px monospace';
+  ctx.fillText('BATTLE',W/2,titleY);
+  ctx.fillText('BALYA',W/2,titleY+titleSize*0.95);
+
+  ctx.strokeStyle='#000';ctx.lineWidth=2;
+  ctx.strokeText('BATTLE',W/2,titleY);
+  ctx.strokeText('BALYA',W/2,titleY+titleSize*0.95);
+
+  const subY=titleY+titleSize*1.55;
+  ctx.fillStyle='#ffd700';
+  ctx.font='bold '+Math.min(W*0.035,17)+'px monospace';
+  ctx.fillText('LEGEND OF THE CYAN BLASTER',W/2,subY);
+
+  ctx.fillStyle='#888';
+  ctx.font='bold '+Math.min(W*0.025,12)+'px monospace';
+  ctx.fillText('14 LEVELS  •  17 WARRIORS  •  ONE HERO',W/2,subY+18);
+
+  const itemH=Math.min(H*0.08,52);
+  const itemW=Math.min(W*0.7,280);
+  const startY=H*0.45;
+  for(let i=0;i<menuItems.length;i++){
+    const iy=startY+i*itemH;
+    const pulse=Math.sin(globalTime*0.003+i)*0.05+1;
+    ctx.fillStyle='rgba(255,255,255,0.1)';
+    ctx.strokeStyle='#ff4466';ctx.lineWidth=2;
+    roundRect(ctx,W/2-itemW/2,iy,itemW,itemH-8,8,true,true);
+    ctx.fillStyle='#fff';
+    ctx.font='bold '+Math.min(W*0.04,16)+'px monospace';
+    ctx.textAlign='center';
+    ctx.fillText(menuItems[i],W/2,iy+itemH/2);
+  }
+
+  ctx.fillStyle='#666';
+  ctx.font='10px monospace';
+  ctx.fillText('A game by  AYUSH BHISE  &  OM SOLANKE',W/2,H-15);
+}
+
+function drawBackButton(){
+  updateBackBtn();
+  ctx.fillStyle='rgba(255,68,68,0.3)';
+  ctx.strokeStyle='#ff4444';ctx.lineWidth=2;
+  roundRect(ctx,backBtn.x,backBtn.y,backBtn.w,backBtn.h,8,true,true);
+  ctx.fillStyle='#fff';
+  ctx.font='bold 14px monospace';
+  ctx.textAlign='center';
+  ctx.fillText('BACK',backBtn.x+backBtn.w/2,backBtn.y+backBtn.h/2+5);
+}
+
+function drawInfoScreen(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a0a2a');grd.addColorStop(1,'#0a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle='#ff4444';ctx.font='bold 24px monospace';ctx.textAlign='center';
+  ctx.fillText('INFORMATION',W/2,50);
+
+  ctx.fillStyle='#ddd';ctx.font='13px monospace';ctx.textAlign='left';
+  const lines=[
+    'BATTLE BALYA is a 2D action shooter game.',
+    '',
+    'Story: Balya wields the LEGENDARY CYAN BLASTER',
+    'forged by Om Solanke. Battle through 14 levels',
+    'against 17 unique warriors, each with their own',
+    'powers and personalities.',
+    '',
+    'Defeat the final boss PIYUSH to save the world!',
+    '',
+    'Developer: AYUSH BHISE',
+    'Co-Creator: OM SOLANKE'
+  ];
+  let ly=85;
+  const startX=Math.max(20,W*0.08);
+  for(const l of lines){ctx.fillText(l,startX,ly);ly+=20;}
+
+  drawBackButton();
+}
+
+function drawHowToPlay(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a0a2a');grd.addColorStop(1,'#0a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle='#00ccff';ctx.font='bold 24px monospace';ctx.textAlign='center';
+  ctx.fillText('HOW TO PLAY',W/2,50);
+
+  ctx.fillStyle='#ddd';ctx.font='12px monospace';ctx.textAlign='left';
+  const lines=[
+    'TOUCH CONTROLS:',
+    '  < >    Move left and right',
+    '  JUMP   Leap into the air',
+    '  FIRE   Unleash the Cyan Blaster',
+    '',
+    'KEYBOARD:',
+    '  Arrow keys / WASD - Move and jump',
+    '  Z, X, Enter - Shoot',
+    '  Space - Jump',
+    '',
+    'TIPS:',
+    '  - Defeat all enemies to advance',
+    '  - Grab green health kits when low',
+    '  - Use platforms to dodge attacks',
+    '  - The boss has multiple attack phases'
+  ];
+  let ly=80;
+  const startX=Math.max(20,W*0.08);
+  for(const l of lines){ctx.fillText(l,startX,ly);ly+=18;}
+
+  drawBackButton();
+}
+
+function drawCredits(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a0a2a');grd.addColorStop(1,'#0a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle='#ffd700';ctx.font='bold 24px monospace';ctx.textAlign='center';
+  ctx.fillText('CREATED BY',W/2,55);
+
+  ctx.fillStyle='#fff';ctx.font='bold 15px monospace';
+  ctx.fillText('Developer & Creator',W/2,100);
+  ctx.fillStyle='#ff6644';ctx.font='bold 22px monospace';
+  ctx.fillText('AYUSH BHISE',W/2,128);
+
+  ctx.fillStyle='#fff';ctx.font='bold 15px monospace';
+  ctx.fillText('Co-Creator & Game Designer',W/2,170);
+  ctx.fillStyle='#00ccff';ctx.font='bold 22px monospace';
+  ctx.fillText('OM SOLANKE',W/2,198);
+
+  ctx.fillStyle='#aaa';ctx.font='12px monospace';ctx.textAlign='center';
+  ctx.fillText('Every detail, enemy, attack, and dialogue',W/2,240);
+  ctx.fillText('is part of the original game design.',W/2,258);
+
+  drawBackButton();
+}
+
+function drawTraining(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a0a2a');grd.addColorStop(0.5,'#0a1a3a');grd.addColorStop(1,'#0a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  for(const s of bgStars){
+    const alpha=0.3+0.7*Math.abs(Math.sin(globalTime*0.002+s.b*10));
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle='#fff';
+    ctx.beginPath();ctx.arc(s.x%W,s.y,s.s,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  const td=trainingDialogues[trainingPhase];
+
+  if(trainingCharIndex<td.text.length){
+    trainingCharTimer++;
+    if(trainingCharTimer>=2){trainingCharTimer=0;trainingCharIndex++;}
+  }
+  if(trainingMinTimer>0)trainingMinTimer--;
+
+  const sceneY=H*0.32;
+  const sw=42,sh=58;
+
+  if(trainingPhase<2){
+    drawSimpleChar(W*0.5-sw/2,sceneY,sw,sh,'#00e5ff','#d4a574','#222','OM SOLANKE');
+  }else if(trainingPhase===2||trainingPhase===3){
+    drawSimpleChar(W*0.5-sw/2,sceneY,sw,sh,'#ff7755','#c8a882','#222','AYUSH BHISE');
+  }else if(trainingPhase===4){
+    drawSimpleChar(W*0.3-sw/2,sceneY,sw,sh,'#00e5ff','#d4a574','#222','OM');
+    drawSimpleChar(W*0.7-sw/2,sceneY,sw,sh,'#1a4a99','#f0d0a0','#2a1a0a','BALYA',true);
+    const gx=W*0.5;const gy=sceneY+sh*0.5;
+    const glow=ctx.createRadialGradient(gx,gy,0,gx,gy,40);
+    glow.addColorStop(0,'rgba(0,255,255,0.7)');
+    glow.addColorStop(1,'transparent');
+    ctx.fillStyle=glow;
+    ctx.beginPath();ctx.arc(gx,gy,40,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#888';ctx.fillRect(gx-12,gy-3,24,6);
+    ctx.fillStyle='#222';ctx.fillRect(gx+8,gy-7,8,14);
+  }else if(trainingPhase===5){
+    drawSimpleChar(W*0.5-sw/2,sceneY,sw,sh,'#1a4a99','#f0d0a0','#2a1a0a','BALYA',true);
+  }else if(trainingPhase===6){
+    drawSimpleChar(W*0.5-sw/2,sceneY,sw,sh,'#ff7755','#c8a882','#222','AYUSH BHISE');
+  }else{
+    drawSimpleChar(W*0.25-sw/2,sceneY,sw,sh,'#00e5ff','#d4a574','#222','OM');
+    drawSimpleChar(W*0.5-sw/2,sceneY-10,sw,sh+10,'#1a4a99','#f0d0a0','#2a1a0a','BALYA',true);
+    drawSimpleChar(W*0.75-sw/2,sceneY,sw,sh,'#ff7755','#c8a882','#222','BHISE');
+  }
+
+  const isPortrait=H>W;
+  const dw=Math.min(W*0.92,540);
+  const padX=20,padY=16;
+  ctx.font='bold 15px monospace';
+  const lines=wrapTextLines(td.text.substring(0,trainingCharIndex),dw-padX*2);
+  const dh=padY*2+30+lines.length*20+22;
+  const dx=(W-dw)/2;
+  const dy=H-dh-30;
+
+  ctx.shadowColor='rgba(0,0,0,0.9)';ctx.shadowBlur=20;
+  ctx.fillStyle='rgba(5,5,15,0.97)';
+  ctx.strokeStyle=td.color;
+  ctx.lineWidth=3;
+  roundRect(ctx,dx,dy,dw,dh,14,true,true);
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle=td.color+'33';
+  ctx.fillRect(dx+1,dy+1,dw-2,32);
+
+  ctx.fillStyle=td.color;
+  ctx.font='bold 14px monospace';
+  ctx.textAlign='left';
+  ctx.fillText(td.speaker,dx+padX,dy+22);
+
+  ctx.fillStyle='#fff';
+  ctx.font='15px monospace';
+  let ly=dy+padY+34;
+  for(const line of lines){
+    ctx.fillText(line,dx+padX,ly);
+    ly+=20;
+  }
+
+  if(trainingCharIndex<td.text.length){
+    if(Math.floor(globalTime/15)%2===0){
+      ctx.fillStyle='#fff';
+      const lastLine=lines[lines.length-1]||'';
+      const cursorX=dx+padX+ctx.measureText(lastLine).width+2;
+      ctx.fillRect(cursorX,ly-15,8,2);
+    }
+  }else{
+    const ready=trainingMinTimer<=0;
+    ctx.fillStyle=ready?'#aaa':'#555';
+    ctx.font='10px monospace';
+    ctx.textAlign='center';
+    const txt=ready?(trainingPhase<trainingDialogues.length-1?'[TAP to continue]':'[TAP to BEGIN]'):'[reading...]';
+    ctx.fillText(txt,W/2,dy+dh-10);
+  }
+
+  ctx.fillStyle='#444';
+  ctx.font='10px monospace';
+  ctx.textAlign='center';
+  ctx.fillText((trainingPhase+1)+' / '+trainingDialogues.length,W/2,20);
+}
+
+function drawSimpleChar(x,y,w,h,clothColor,skinColor,hairColor,name,isHero){
+  if(isHero){
+    const cx=x+w/2,cy=y+h/2;
+    const aura=ctx.createRadialGradient(cx,cy,0,cx,cy,w*1.2);
+    aura.addColorStop(0,'rgba(0,255,255,0.2)');
+    aura.addColorStop(1,'transparent');
+    ctx.fillStyle=aura;
+    ctx.beginPath();ctx.arc(cx,cy,w*1.2,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#aa1a1a';
+    ctx.beginPath();
+    ctx.moveTo(x+w*0.3,y+h*0.25);
+    ctx.lineTo(x-4,y+h*0.7);
+    ctx.lineTo(x+w*0.5,y+h*0.85);
+    ctx.lineTo(x+w+4,y+h*0.7);
+    ctx.lineTo(x+w*0.7,y+h*0.25);
+    ctx.closePath();ctx.fill();
+  }
+  ctx.fillStyle=clothColor;
+  ctx.fillRect(x+w*0.18,y+h*0.3,w*0.64,h*0.36);
+  ctx.fillStyle=skinColor;
+  ctx.beginPath();ctx.arc(x+w/2,y+h*0.18,w*0.32,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=hairColor;
+  ctx.fillRect(x+w*0.2,y+h*0.05,w*0.6,h*0.14);
+  if(isHero){
+    ctx.fillStyle='#ffd700';
+    ctx.beginPath();
+    ctx.moveTo(x+w/2-10,y+h*0.07);
+    ctx.lineTo(x+w/2,y-2);
+    ctx.lineTo(x+w/2+10,y+h*0.07);
+    ctx.closePath();ctx.fill();
+  }
+  ctx.fillStyle='#fff';
+  ctx.beginPath();ctx.arc(x+w/2-3,y+h*0.18,2.5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(x+w/2+5,y+h*0.18,2.5,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#000';
+  ctx.beginPath();ctx.arc(x+w/2-3,y+h*0.18,1,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(x+w/2+5,y+h*0.18,1,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=clothColor;
+  ctx.fillRect(x+w*0.22,y+h*0.62,w*0.22,h*0.38);
+  ctx.fillRect(x+w*0.56,y+h*0.62,w*0.22,h*0.38);
+  ctx.fillStyle='#fff';ctx.font='bold 11px monospace';ctx.textAlign='center';
+  ctx.fillText(name,x+w/2,y+h+18);
+}
+
+function drawLevelIntro(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a0a2a');grd.addColorStop(1,'#1a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  const alpha=Math.min(1,(180-introTimer)/30);
+  ctx.globalAlpha=alpha;
+
+  ctx.shadowColor='#ff4444';ctx.shadowBlur=20;
+  ctx.fillStyle='#ff4444';ctx.font='bold '+Math.min(W*0.1,52)+'px monospace';ctx.textAlign='center';
+  ctx.fillText('LEVEL '+currentLevel,W/2,H*0.3);
+  ctx.shadowBlur=0;
+
+  const lvlIdx=currentLevel-1;
+  if(lvlIdx<LEVEL_ENEMIES.length){
+    const eNames=LEVEL_ENEMIES[lvlIdx].filter(i=>i<ENEMIES_DATA.length).map(i=>ENEMIES_DATA[i].name);
+    ctx.fillStyle='#ffcc44';ctx.font='bold '+Math.min(W*0.05,22)+'px monospace';
+    ctx.fillText('VS  '+eNames.join(' & '),W/2,H*0.45);
+
+    if(eNames.length>0){
+      const firstE=ENEMIES_DATA[LEVEL_ENEMIES[lvlIdx][0]];
+      ctx.fillStyle='#bbb';ctx.font='italic '+Math.min(W*0.035,15)+'px monospace';
+      ctx.fillText('"'+firstE.dialogue+'"',W/2,H*0.58);
+    }
+  }
+
+  ctx.fillStyle='#888';ctx.font='13px monospace';
+  ctx.fillText('TAP TO BEGIN',W/2,H*0.78);
+
+  ctx.globalAlpha=1;
+  if(introTimer>0)introTimer--;
+}
+
+function drawLevelComplete(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a3a0a');grd.addColorStop(1,'#0a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  ctx.shadowColor='#44ff44';ctx.shadowBlur=20;
+  ctx.fillStyle='#44ff44';ctx.font='bold '+Math.min(W*0.08,42)+'px monospace';ctx.textAlign='center';
+  ctx.fillText('LEVEL COMPLETE!',W/2,H*0.3);
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle='#ffd700';ctx.font='bold 20px monospace';
+  ctx.fillText('Score: '+score,W/2,H*0.45);
+
+  ctx.fillStyle='#aaa';ctx.font='14px monospace';
+  ctx.fillText('TAP TO CONTINUE',W/2,H*0.65);
+}
+
+function drawGameOver(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#3a0a0a');grd.addColorStop(1,'#0a0a1a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  ctx.shadowColor='#ff2222';ctx.shadowBlur=25;
+  ctx.fillStyle='#ff2222';ctx.font='bold '+Math.min(W*0.1,52)+'px monospace';ctx.textAlign='center';
+  ctx.fillText('GAME OVER',W/2,H*0.3);
+  ctx.shadowBlur=0;
+
+  ctx.fillStyle='#ccc';ctx.font='17px monospace';
+  ctx.fillText('Score: '+score,W/2,H*0.45);
+  ctx.fillText('Level: '+currentLevel,W/2,H*0.55);
+
+  ctx.fillStyle='#888';ctx.font='14px monospace';
+  ctx.fillText('TAP TO RETURN TO MENU',W/2,H*0.7);
+}
+
+const endingSequence=[
+  {duration:200,draw:function(t){
+    const a=Math.min(1,t/60);
+    ctx.globalAlpha=a;
+    ctx.shadowColor='#ffd700';ctx.shadowBlur=40;
+    ctx.fillStyle='#ffd700';ctx.font='bold '+Math.min(W*0.13,68)+'px monospace';ctx.textAlign='center';
+    ctx.fillText('VICTORY',W/2,H*0.4);
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#fff';ctx.font='bold '+Math.min(W*0.04,22)+'px monospace';
+    ctx.fillText('All enemies have been defeated',W/2,H*0.55);
+    ctx.globalAlpha=1;
+  }},
+  {duration:280,draw:function(t){
+    const a=Math.min(1,t/40);
+    ctx.globalAlpha=a;
+    ctx.fillStyle='#00e5ff';ctx.font='bold 18px monospace';ctx.textAlign='center';
+    ctx.fillText('OM SOLANKE speaks...',W/2,H*0.18);
+    ctx.fillStyle='#fff';ctx.font='15px monospace';
+    const lines=['Balya... you have done what no one else could.','You fought through every enemy, every challenge.','The Cyan Blaster chose you for a reason.','You are the TRUE CHAMPION of this world.'];
+    let ly=H*0.35;
+    for(let i=0;i<lines.length;i++){
+      const la=Math.min(1,(t-i*45)/30);
+      if(la>0){ctx.globalAlpha=la;ctx.fillText(lines[i],W/2,ly);}
+      ly+=28;
+    }
+    ctx.globalAlpha=1;
+  }},
+  {duration:280,draw:function(t){
+    const a=Math.min(1,t/40);
+    ctx.globalAlpha=a;
+    ctx.fillStyle='#ff7755';ctx.font='bold 18px monospace';ctx.textAlign='center';
+    ctx.fillText('AYUSH BHISE speaks...',W/2,H*0.18);
+    ctx.fillStyle='#fff';ctx.font='15px monospace';
+    const lines=['I built this battlefield pixel by pixel.','Every enemy, every attack, every dialogue...','was designed to test you. And you passed them all.','This world will remember the name BALYA forever.'];
+    let ly=H*0.35;
+    for(let i=0;i<lines.length;i++){
+      const la=Math.min(1,(t-i*45)/30);
+      if(la>0){ctx.globalAlpha=la;ctx.fillText(lines[i],W/2,ly);}
+      ly+=28;
+    }
+    ctx.globalAlpha=1;
+  }},
+  {duration:240,draw:function(t){
+    const a=Math.min(1,t/40);
+    ctx.globalAlpha=a;
+    ctx.shadowColor='#44ff66';ctx.shadowBlur=20;
+    ctx.fillStyle='#44ff66';ctx.font='bold 26px monospace';ctx.textAlign='center';
+    ctx.fillText('BALYA:',W/2,H*0.25);
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#fff';ctx.font='17px monospace';
+    const lines=['This was my destiny.','No enemy was too strong, no battle too hard.','I am BATTLE BALYA... and I am LEGENDARY.'];
+    let ly=H*0.42;
+    for(let i=0;i<lines.length;i++){
+      const la=Math.min(1,(t-i*55)/30);
+      if(la>0){ctx.globalAlpha=la;ctx.fillText(lines[i],W/2,ly);}
+      ly+=30;
+    }
+    ctx.globalAlpha=1;
+  }},
+  {duration:340,draw:function(t){
+    const a=Math.min(1,t/60);
+    ctx.globalAlpha=a;
+
+    ctx.shadowColor='#ffd700';ctx.shadowBlur=18;
+    ctx.fillStyle='#ffd700';ctx.font='bold '+Math.min(W*0.05,30)+'px monospace';ctx.textAlign='center';
+    ctx.fillText('FINAL SCORE',W/2,H*0.18);
+    ctx.shadowBlur=0;
+
+    ctx.fillStyle='#fff';ctx.font='bold '+Math.min(W*0.1,52)+'px monospace';
+    ctx.fillText(''+score,W/2,H*0.3);
+
+    ctx.fillStyle='#aaa';ctx.font='15px monospace';
+    ctx.fillText('14 Levels Completed',W/2,H*0.4);
+    ctx.fillText('17 Enemies Defeated',W/2,H*0.46);
+
+    ctx.fillStyle='#ffd700';ctx.font='bold 14px monospace';
+    ctx.fillText('CREATED BY',W/2,H*0.58);
+    ctx.fillStyle='#ff6644';ctx.font='bold 13px monospace';
+    ctx.fillText('AYUSH BHISE - Developer & Creator',W/2,H*0.64);
+    ctx.fillStyle='#00ccff';
+    ctx.fillText('OM SOLANKE - Co-Creator & Game Designer',W/2,H*0.7);
+    ctx.fillStyle='#888';ctx.font='11px monospace';
+    ctx.fillText('Story, Design, Enemies & Dialogues by both creators',W/2,H*0.78);
+
+    ctx.globalAlpha=1;
+  }},
+  {duration:200,draw:function(t){
+    const a=Math.min(1,t/60);
+    ctx.globalAlpha=a;
+    ctx.shadowColor='#ffd700';ctx.shadowBlur=25;
+    ctx.fillStyle='#ffd700';ctx.font='bold '+Math.min(W*0.06,40)+'px monospace';ctx.textAlign='center';
+    ctx.fillText('THANK YOU FOR PLAYING',W/2,H*0.35);
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#fff';ctx.font='bold 22px monospace';
+    ctx.fillText('BATTLE BALYA',W/2,H*0.5);
+    ctx.fillStyle='#aaa';ctx.font='13px monospace';
+    ctx.fillText('The Legend Lives On...',W/2,H*0.62);
+    if(t>140){
+      const fa=Math.min(1,(t-140)/40);
+      ctx.globalAlpha=fa;
+      ctx.fillStyle='#666';ctx.font='11px monospace';
+      ctx.fillText('Returning to menu...',W/2,H*0.78);
+    }
+    ctx.globalAlpha=1;
+  }}
+];
+
+function drawEnding(){
+  const grd=ctx.createLinearGradient(0,0,0,H);
+  grd.addColorStop(0,'#0a0a2a');grd.addColorStop(0.5,'#1a0a1a');grd.addColorStop(1,'#0a0a2a');
+  ctx.fillStyle=grd;ctx.fillRect(0,0,W,H);
+
+  for(const s of bgStars){
+    const sx=(s.x+globalTime*0.05)%W;
+    const alpha=0.3+0.7*Math.abs(Math.sin(globalTime*0.001+s.b*10));
+    ctx.globalAlpha=alpha;
+    ctx.fillStyle='#fff';
+    ctx.beginPath();ctx.arc(sx,s.y,s.s,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  endingTimer++;
+  if(endingPhase<endingSequence.length){
+    const phase=endingSequence[endingPhase];
+    phase.draw(endingTimer);
+    if(endingTimer>=phase.duration){endingPhase++;endingTimer=0;}
+  }else{
+    gameState=STATE.MENU;score=0;currentLevel=0;
+  }
+}
+
+function update(){
+  globalTime++;
+  if(gameState===STATE.PLAYING){
+    updatePlayer();
+    updateEnemies();
+    updateBullets();
+    updateParticles();
+    updateHealthKits();
+    updateDialogue();
+    if(shakeTimer>0)shakeTimer--;
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+
+  if(gameState===STATE.MENU){drawMenu();return;}
+  if(gameState===STATE.INFO){drawInfoScreen();return;}
+  if(gameState===STATE.HOW_TO_PLAY){drawHowToPlay();return;}
+  if(gameState===STATE.CREDITS){drawCredits();return;}
+  if(gameState===STATE.TRAINING){drawTraining();return;}
+  if(gameState===STATE.LEVEL_INTRO){drawLevelIntro();return;}
+  if(gameState===STATE.LEVEL_COMPLETE){drawLevelComplete();return;}
+  if(gameState===STATE.GAME_OVER){drawGameOver();return;}
+  if(gameState===STATE.ENDING){drawEnding();return;}
+
+  ctx.save();
+  if(shakeTimer>0){
+    ctx.translate(
+      (Math.random()-0.5)*shakeIntensity*2,
+      (Math.random()-0.5)*shakeIntensity*2
+    );
+  }
+
+  drawBackground();
+  drawGround();
+  drawPlatforms();
+  drawHealthKits();
+  drawPlayer();
+  drawEnemies();
+  drawBullets();
+  drawParticles();
+
+  ctx.restore();
+
+  drawHUD();
+  drawTouchControls();
+  drawDialogue();
+}
+
+function gameLoop(){
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>
